@@ -1,3 +1,4 @@
 .env
 .garminconnect
 .garmin_cache
+.cache
