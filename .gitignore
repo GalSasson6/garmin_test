@@ -2,3 +2,44 @@
 .garminconnect
 .garmin_cache
 .cache
+
+# Byte-compiled / caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment and credentials
+# (already listed above)
+
+# Local cache directories
+cache/
+
+# Temporary and exported data
+temp_*
+*.log
+*.json
+*.sqlite3
+*.db
+*.csv
+
+# Garmin / GPS files and exports
+*.gpx
+*.kml
+*.tcx
+*.fit
+
+# Generated map/HTML outputs
+*.html
+
+# Archives
+*.zip
+*.tar.gz
+*.tgz
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE/editor
+.vscode/
+*.swp
