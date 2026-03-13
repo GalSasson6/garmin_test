@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+pydantic
+garminconnect
+python-dotenv
+pandas
+geopandas
+shapely
+folium
+osmnx
+geopy
+networkx
+scikit-learn

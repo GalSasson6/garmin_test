@@ -43,3 +43,35 @@ Thumbs.db
 # IDE/editor
 .vscode/
 *.swp
+
+# Virtual environments
+.venv/
+env/
+venv/
+ENV/
+
+# Python build / packaging
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# Testing and type-checking caches
+.pytest_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+frontend/node_modules/
+frontend/build/
+
+# IDEs
+.idea/
+*.sublime-workspace
+*.sublime-project
