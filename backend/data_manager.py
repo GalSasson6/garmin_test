@@ -3,10 +3,11 @@ import json
 import logging
 import time
 import hashlib
+import sqlite3
 from datetime import datetime
 import pandas as pd
 import geopandas as gpd
-from shapely.geometry import LineString
+from shapely.geometry import LineString, Point
 from shapely.ops import linemerge, unary_union
 import osmnx as ox
 from geopy.geocoders import Nominatim
@@ -30,6 +31,7 @@ ox.settings.log_console = False
 CACHE_DIR = ".garmin_cache"
 POLYLINES_DIR = os.path.join(CACHE_DIR, "polylines")
 STATS_CACHE_FILE = os.path.join(CACHE_DIR, "backend_city_stats_cache.json")
+DATABASE_FILE = os.path.join(CACHE_DIR, "garmin_data.gpkg")
 CRS_METERS = "EPSG:3857"
 COVERAGE_BUFFER_RADIUS_METERS = 12
 UNIQUE_TRACE_BUFFER_RADIUS_METERS = 12
@@ -48,6 +50,108 @@ class DataManager:
         self.city_cache = self._load_city_cache()
         self.stats_cache = self._load_stats_cache()
         self.is_authenticated = False
+        self._init_db()
+
+    def _init_db(self):
+        # We use GeoPackage via geopandas. 
+        # Tables/Layers we need:
+        # 1. 'cities': name, total_street_km, city_area_sq_km, last_updated
+        # 2. 'processed_runs': activity_id, city_name, processed_at
+        # 3. 'segments_{city_hash}': geometry, is_covered, pass_count
+        pass
+
+    def _get_city_layer_name(self, city_name):
+        # GeoPackage layer names should be simple
+        clean_name = "".join(c for c in city_name if c.isalnum())
+        return f"segments_{clean_name}"
+
+    def _load_layer(self, layer_name):
+        if not os.path.exists(DATABASE_FILE):
+            return None
+        try:
+            return gpd.read_file(DATABASE_FILE, layer=layer_name, engine="pyogrio")
+        except:
+            return None
+
+    def _save_layer(self, gdf, layer_name):
+        gdf.to_file(DATABASE_FILE, layer=layer_name, driver="GPKG", engine="pyogrio")
+
+    def _get_processed_runs(self):
+        df = self._load_layer("processed_runs")
+        if df is None:
+            return pd.DataFrame(columns=["activity_id", "city_name", "processed_at"])
+        return pd.DataFrame(df.drop(columns="geometry"))
+
+    def _mark_runs_processed(self, activity_ids, city_name):
+        runs = self._get_processed_runs()
+        new_records = []
+        now = datetime.now().isoformat()
+        for act_id in activity_ids:
+            new_records.append({
+                "activity_id": str(act_id),
+                "city_name": city_name,
+                "processed_at": now
+            })
+        
+        if not new_records:
+            return
+
+        updated_runs = pd.concat([runs, pd.DataFrame(new_records)], ignore_index=True)
+        # GeoPackage needs a geometry column even for metadata tables if using geopandas
+        gdf = gpd.GeoDataFrame(updated_runs, geometry=[Point(0,0)]*len(updated_runs), crs="EPSG:4326")
+        self._save_layer(gdf, "processed_runs")
+
+    def _init_city_segments(self, city_name, place_query):
+        """Initial download and segmenting of a city's street network."""
+        logger.info(f"Initializing segments for {city_name}")
+        G = ox.graph_from_place(place_query, network_type='walk')
+        nodes, edges = ox.graph_to_gdfs(G)
+        edges_m = edges.to_crs(CRS_METERS)
+        
+        # Linearize to ensure we have simple LineStrings
+        segments_gdf = self._linearize_gdf(edges_m)
+        segments_gdf['is_covered'] = 0
+        segments_gdf['pass_count'] = 0
+        
+        layer_name = self._get_city_layer_name(city_name)
+        self._save_layer(segments_gdf, layer_name)
+        return segments_gdf
+
+    def _update_city_stats_incremental(self, city_name, run_ids, city_run_paths, place_query):
+        layer_name = self._get_city_layer_name(city_name)
+        segments_gdf = self._load_layer(layer_name)
+        
+        if segments_gdf is None:
+            segments_gdf = self._init_city_segments(city_name, place_query)
+        
+        processed_runs = self._get_processed_runs()
+        processed_ids = set(processed_runs[processed_runs['city_name'] == city_name]['activity_id'].astype(str).tolist())
+        
+        new_run_ids_to_mark = []
+        new_runs_count = 0
+        
+        for act_id, path in zip(run_ids, city_run_paths):
+            if str(act_id) in processed_ids:
+                continue
+                
+            logger.info(f"Processing run {act_id} for {city_name} incrementally")
+            run_line = LineString([(lon, lat) for lat, lon in path])
+            run_gdf = gpd.GeoDataFrame(geometry=[run_line], crs="EPSG:4326").to_crs(CRS_METERS)
+            run_buffer = run_gdf.geometry.iloc[0].buffer(COVERAGE_BUFFER_RADIUS_METERS)
+            
+            # Find intersecting segments
+            intersects = segments_gdf.intersects(run_buffer)
+            segments_gdf.loc[intersects, 'is_covered'] = 1
+            segments_gdf.loc[intersects, 'pass_count'] += 1
+            
+            new_run_ids_to_mark.append(act_id)
+            new_runs_count += 1
+            
+        if new_runs_count > 0:
+            self._save_layer(segments_gdf, layer_name)
+            self._mark_runs_processed(new_run_ids_to_mark, city_name)
+            
+        return segments_gdf
 
     def _load_runs_summary(self):
         runs_file = os.path.join(CACHE_DIR, "runs_summary.json")
@@ -147,6 +251,106 @@ class DataManager:
 
         # Approximate the centerline length of the unioned run corridor.
         return union_geom.area / (2 * buffer_radius_m)
+
+    def _empty_line_gdf(self, crs, extra_columns=None):
+        columns = list(extra_columns or []) + ["geometry"]
+        return gpd.GeoDataFrame(columns=columns, geometry="geometry", crs=crs)
+
+    def _polyline_length_m(self, polyline):
+        if not polyline or len(polyline) < 2:
+            return 0.0
+
+        run_line = LineString([(lon, lat) for lat, lon in polyline])
+        run_gdf = gpd.GeoDataFrame(geometry=[run_line], crs="EPSG:4326").to_crs(CRS_METERS)
+        return float(run_gdf.geometry.length.iloc[0])
+
+    def _build_run_corridor(self, geometries, buffer_radius_m):
+        buffered_geometries = [
+            geom.buffer(buffer_radius_m)
+            for geom in geometries
+            if geom is not None and not geom.is_empty
+        ]
+        if not buffered_geometries:
+            return None
+
+        buffered_series = gpd.GeoSeries(buffered_geometries, crs=CRS_METERS)
+        try:
+            return buffered_series.union_all()
+        except AttributeError:
+            return buffered_series.unary_union
+
+    def _clip_segments_to_geometry(self, segments_gdf, clip_geometry, extra_columns=None):
+        crs = segments_gdf.crs if segments_gdf is not None else CRS_METERS
+        if segments_gdf is None or segments_gdf.empty or clip_geometry is None or clip_geometry.is_empty:
+            return self._empty_line_gdf(crs, extra_columns=extra_columns)
+
+        clipped_segments = segments_gdf.copy()
+        clipped_segments.geometry = clipped_segments.geometry.intersection(clip_geometry)
+        clipped_segments = self._linearize_gdf(clipped_segments, extra_columns=extra_columns)
+        if clipped_segments.empty:
+            return clipped_segments
+
+        return clipped_segments[~clipped_segments.geometry.is_empty].reset_index(drop=True)
+
+    def _difference_segments_from_geometry(self, segments_gdf, erase_geometry):
+        crs = segments_gdf.crs if segments_gdf is not None else CRS_METERS
+        if segments_gdf is None or segments_gdf.empty:
+            return self._empty_line_gdf(crs)
+
+        remaining_segments = segments_gdf.copy()
+        if erase_geometry is None or erase_geometry.is_empty:
+            remaining_segments = self._linearize_gdf(remaining_segments)
+        else:
+            remaining_segments.geometry = remaining_segments.geometry.difference(erase_geometry)
+            remaining_segments = self._linearize_gdf(remaining_segments)
+
+        if remaining_segments.empty:
+            return remaining_segments
+
+        return remaining_segments[~remaining_segments.geometry.is_empty].reset_index(drop=True)
+
+    def _calculate_unique_covered_length_m(self, segments_gdf, run_geometries, total_ran_distance_m):
+        extra_columns = [col for col in ["pass_count"] if col in segments_gdf.columns]
+        run_corridor = self._build_run_corridor(run_geometries, COVERAGE_BUFFER_RADIUS_METERS)
+        if run_corridor is None or run_corridor.is_empty:
+            return 0.0, self._empty_line_gdf(segments_gdf.crs, extra_columns=extra_columns), None
+
+        touched_segments = segments_gdf[segments_gdf.intersects(run_corridor)].copy()
+        covered_segments = self._clip_segments_to_geometry(
+            touched_segments,
+            run_corridor,
+            extra_columns=extra_columns,
+        )
+
+        if "pass_count" in covered_segments.columns and not covered_segments.empty:
+            covered_segments["pass_count"] = (
+                pd.to_numeric(covered_segments["pass_count"], errors="coerce")
+                .fillna(0)
+                .astype(int)
+                .clip(lower=1)
+            )
+
+        clipped_covered_length_m = self.merged_line_length_m(covered_segments.geometry)
+        approx_unique_trace_length_m = self._approx_unique_trace_length_m(
+            run_geometries,
+            UNIQUE_TRACE_BUFFER_RADIUS_METERS,
+        )
+
+        if (
+            approx_unique_trace_length_m > 0
+            and clipped_covered_length_m > approx_unique_trace_length_m
+        ):
+            logger.info(
+                "Clipping unique covered length to approximate unique trace length "
+                f"({clipped_covered_length_m:.2f}m -> {approx_unique_trace_length_m:.2f}m)"
+            )
+            clipped_covered_length_m = approx_unique_trace_length_m
+
+        unique_covered_length_m = self._cap_unique_covered_length_m(
+            clipped_covered_length_m,
+            total_ran_distance_m,
+        )
+        return unique_covered_length_m, covered_segments, run_corridor
 
     def authenticate(self, mfa_code=None):
         """
@@ -288,6 +492,7 @@ class DataManager:
         runs = [act for act in self.runs_summary if act.get('activityType', {}).get('typeKey', '') in ['running']]
         city_run_paths = []
         city_run_ids = []
+        city_run_lines = []
         total_ran_distance_m = 0
         
         # Quick filtering of runs in this city
@@ -302,155 +507,92 @@ class DataManager:
                         if self.get_city_name(lat, lon) == city_name:
                             city_run_paths.append(polyline)
                             city_run_ids.append(act_id)
-                            total_ran_distance_m += run.get('distance', 0) or 0
+                            if len(polyline) > 1:
+                                city_run_lines.append(LineString([(lon, lat) for lat, lon in polyline]))
+
+                            distance_m = float(run.get('distance', 0) or 0)
+                            if distance_m <= 0:
+                                distance_m = self._polyline_length_m(polyline)
+                            total_ran_distance_m += distance_m
 
         if not city_run_paths:
             yield {"status": "No runs found for this city.", "progress": 100, "type": "progress"}
             yield {"result": None, "type": "result"}
             return
 
-        # Check Cache
-        yield {"status": "Checking cache...", "progress": 20, "type": "progress"}
-        cache_key = self._get_stats_cache_key(city_name, city_run_ids)
-        if cache_key in self.stats_cache:
-            logger.info(f"Returning cached stats for {city_name}")
-            yield {"status": "Loading from cache...", "progress": 100, "type": "progress"}
-            yield {"result": self.stats_cache[cache_key], "type": "result"}
-            return
-
-        logger.info(f"Calculating new stats for {city_name}")
-
-        # GIS calculations
-        shapely_lines = [LineString([(lon, lat) for lat, lon in path]) for path in city_run_paths]
-        gdf_runs = gpd.GeoDataFrame(geometry=shapely_lines, crs="EPSG:4326")
-        runs_m = gdf_runs.to_crs(CRS_METERS)
+        # Check Cache for final result display speed, but we still update the DB
+        # yield {"status": "Checking cache...", "progress": 20, "type": "progress"}
         
-        # City boundary and street network (OSMNX)
+        # City boundary and street network query
         place_query = f"{city_name}, Israel"
         if "Be'er Sheva" in city_name or "Be\u05d2\u20ac\u2122er-Sheva" in city_name:
              place_query = "Be'er Sheva, Israel"
 
-        yield {"status": f"Downloading {city_name} street network (OSM)...", "progress": 40, "type": "progress"}
+        yield {"status": f"Syncing {city_name} coverage database...", "progress": 40, "type": "progress"}
+        try:
+            segments_gdf = self._update_city_stats_incremental(city_name, city_run_ids, city_run_paths, place_query)
+        except Exception as e:
+            logger.error(f"Error updating DB for {city_name}: {e}")
+            yield {"status": f"Error: {str(e)}", "progress": 100, "type": "progress"}
+            yield {"result": None, "type": "result"}
+            return
+
+        yield {"status": "Calculating statistics...", "progress": 80, "type": "progress"}
+
+        if city_run_lines:
+            runs_m = gpd.GeoDataFrame(geometry=city_run_lines, crs="EPSG:4326").to_crs(CRS_METERS)
+            run_geometries = list(runs_m.geometry)
+        else:
+            runs_m = self._empty_line_gdf(CRS_METERS)
+            run_geometries = []
+
+        total_street_length_m = self.merged_line_length_m(segments_gdf.geometry)
+        covered_street_length_m, covered_segments, run_corridor = self._calculate_unique_covered_length_m(
+            segments_gdf,
+            run_geometries,
+            total_ran_distance_m,
+        )
+        uncovered_segments = self._difference_segments_from_geometry(segments_gdf, run_corridor)
+        
+        # City area calculation
         try:
             city_gdf = ox.geocode_to_gdf(place_query)
-            city_gdf_m = city_gdf.to_crs(CRS_METERS)
-            city_area_sq_m = city_gdf_m.geometry.unary_union.area
-            city_area_sq_km = city_area_sq_m / 1_000_000
+            city_area_sq_km = city_gdf.to_crs(CRS_METERS).geometry.unary_union.area / 1_000_000
         except:
             city_area_sq_km = 0
 
+        # Format covered streets for the map
+        covered_streets_data = []
+        covered_4326 = covered_segments.to_crs("EPSG:4326")
+        for idx, row in covered_4326.iterrows():
+            geom = row.geometry
+            count = int(row.get('pass_count', 1) or 1)
+            if geom.geom_type == 'LineString':
+                covered_streets_data.append({
+                    'path': [(lat, lon) for lon, lat in geom.coords],
+                    'count': count
+                })
+
+        # Uncovered streets for mapping
         uncovered_streets_coords = []
-        try:
-            G = ox.graph_from_place(place_query, network_type='walk')
-            nodes, edges = ox.graph_to_gdfs(G)
-            edges_m = edges.to_crs(CRS_METERS)
-            total_street_length_m = self.merged_line_length_m(edges_m.geometry)
-            
-            yield {"status": "Calculating street coverage and counts...", "progress": 80, "type": "progress"}
-            # Create buffers for each individual run
-            run_buffers = [geom.buffer(COVERAGE_BUFFER_RADIUS_METERS) for geom in runs_m.geometry]
-            gdf_buffers = gpd.GeoDataFrame(geometry=run_buffers, crs=CRS_METERS)
-            gdf_buffers['run_index'] = range(len(run_buffers))
-            
-            # Use spatial join to count how many runs intersect each edge
-            edges_with_runs = gpd.sjoin(edges_m, gdf_buffers, how='inner', predicate='intersects')
-            
-            # Count unique runs per edge. The join result has a multi-index if edges had one.
-            # We want to count how many distinct 'run_index' values matched each original edge.
-            # Easiest way: group by the original index of edges_m.
-            run_counts = edges_with_runs.groupby(edges_with_runs.index).run_index.nunique()
-            
-            # Map counts back to edges_m
-            edges_m['pass_count'] = run_counts
-            
-            # Only count the actual street segments inside the run buffer,
-            # not the full edge length for every touched edge.
-            try:
-                combined_buffer = gdf_buffers.geometry.union_all()
-            except AttributeError:
-                combined_buffer = gdf_buffers.geometry.unary_union
+        uncovered_4326 = uncovered_segments.to_crs("EPSG:4326")
+        for geom in uncovered_4326.geometry:
+            if geom.geom_type == 'LineString':
+                uncovered_streets_coords.append([(lat, lon) for lon, lat in geom.coords])
 
-            covered_edges = edges_m[edges_m['pass_count'] > 0].copy()
-            covered_edges.geometry = covered_edges.geometry.intersection(combined_buffer)
-            covered_edges = self._linearize_gdf(covered_edges, extra_columns=['pass_count'])
-            
-            covered_street_length_m = self.merged_line_length_m(covered_edges.geometry)
-            approx_unique_trace_length_m = self._approx_unique_trace_length_m(
-                runs_m.geometry,
-                UNIQUE_TRACE_BUFFER_RADIUS_METERS,
-            )
-            if covered_street_length_m > approx_unique_trace_length_m:
-                logger.info(
-                    "Clipping unique covered length to approximate unique trace length "
-                    f"({covered_street_length_m:.2f}m -> {approx_unique_trace_length_m:.2f}m)"
-                )
-                covered_street_length_m = approx_unique_trace_length_m
-            covered_street_length_m = self._cap_unique_covered_length_m(
-                covered_street_length_m,
-                total_ran_distance_m,
-            )
-            
-            # Format covered streets for the map (with pass counts)
-            covered_streets_data = []
-            covered_edges_4326 = covered_edges.to_crs("EPSG:4326")
-            for idx, row in covered_edges_4326.iterrows():
-                geom = row.geometry
-                try:
-                    count = int(row['pass_count'])
-                except (ValueError, TypeError):
-                    count = 1
-                if geom.geom_type == 'LineString':
-                    covered_streets_data.append({
-                        'path': [(lat, lon) for lon, lat in geom.coords],
-                        'count': count
-                    })
-                elif geom.geom_type == 'MultiLineString':
-                    for part in geom.geoms:
-                        covered_streets_data.append({
-                            'path': [(lat, lon) for lon, lat in part.coords],
-                            'count': count
-                        })
-
-            # Uncovered streets for mapping
-            uncovered_streets_gdf = edges_m.copy()
-            uncovered_streets_gdf.geometry = uncovered_streets_gdf.geometry.difference(combined_buffer)
-            uncovered_streets_gdf = self._linearize_gdf(uncovered_streets_gdf)
-            
-            yield {"status": "Formatting map data...", "progress": 95, "type": "progress"}
-            # Convert uncovered streets back to 4326 for the map
-            uncovered_streets_4326 = uncovered_streets_gdf.to_crs("EPSG:4326")
-            for geom in uncovered_streets_4326.geometry:
-                if geom.geom_type == 'LineString':
-                    uncovered_streets_coords.append([(lat, lon) for lon, lat in geom.coords])
-                elif geom.geom_type == 'MultiLineString':
-                    for part in geom.geoms:
-                        uncovered_streets_coords.append([(lat, lon) for lon, lat in part.coords])
-            
-            unique_covered_km = covered_street_length_m / 1000
-            total_street_km = total_street_length_m / 1000
-            percent_coverage = (covered_street_length_m / total_street_length_m) * 100 if total_street_length_m > 0 else 0
-        except Exception as e:
-            logger.error(f"Error fetching OSM data for {city_name}: {e}")
-            unique_covered_km = 0
-            total_street_km = 0
-            percent_coverage = 0
-            covered_streets_data = []
-
+        percent_coverage = (covered_street_length_m / total_street_length_m) * 100 if total_street_length_m > 0 else 0
+        
         stats_result = {
             'city': city_name,
             'total_ran_km': total_ran_distance_m / 1000,
-            'unique_covered_km': unique_covered_km,
-            'total_street_km': total_street_km,
+            'unique_covered_km': covered_street_length_m / 1000,
+            'total_street_km': total_street_length_m / 1000,
             'city_area_sq_km': city_area_sq_km,
             'percent_coverage': percent_coverage,
-            'run_paths': city_run_paths, # Keep raw paths for legacy/internal use if needed
-            'covered_streets': covered_streets_data, # New grouped data
+            'run_paths': city_run_paths,
+            'covered_streets': covered_streets_data,
             'uncovered_streets': uncovered_streets_coords
         }
-
-        # Save to cache
-        self.stats_cache[cache_key] = stats_result
-        self._save_stats_cache()
 
         yield {"status": "Complete!", "progress": 100, "type": "progress"}
         yield {"result": stats_result, "type": "result"}

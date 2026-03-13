@@ -4,6 +4,9 @@ echo   Starting Garmin City Explorer
 echo ==========================================
 echo.
 
+echo [+] Stopping existing backend instances...
+powershell -NoProfile -Command "$backendProcs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'backend\\.main' }; if ($backendProcs) { $backendProcs | ForEach-Object { Stop-Process -Id $_.ProcessId -Force } }"
+
 :: Check if node_modules exists in frontend
 if not exist "frontend\node_modules\" (
     echo [!] Frontend dependencies not found. 
