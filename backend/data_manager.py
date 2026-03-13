@@ -115,6 +115,29 @@ class DataManager:
         
         layer_name = self._get_city_layer_name(city_name)
         self._save_layer(segments_gdf, layer_name)
+        
+        # Store metadata including the "True" unique street length
+        total_unique_length_m = self.merged_line_length_m(segments_gdf.geometry)
+        cities_df = self._load_layer("cities")
+        if cities_df is None:
+            cities_df = pd.DataFrame(columns=["name", "total_unique_length_m", "city_area_sq_km", "last_updated"])
+        
+        new_city_meta = {
+            "name": city_name,
+            "total_unique_length_m": total_unique_length_m,
+            "city_area_sq_km": 0, # Will be updated later
+            "last_updated": datetime.now().isoformat()
+        }
+        
+        # Update or add
+        if city_name in cities_df['name'].values:
+            cities_df.loc[cities_df['name'] == city_name, ["total_unique_length_m", "last_updated"]] = [total_unique_length_m, new_city_meta["last_updated"]]
+        else:
+            cities_df = pd.concat([cities_df, pd.DataFrame([new_city_meta])], ignore_index=True)
+            
+        cities_gdf = gpd.GeoDataFrame(cities_df, geometry=[Point(0,0)]*len(cities_df), crs="EPSG:4326")
+        self._save_layer(cities_gdf, "cities")
+        
         return segments_gdf
 
     def _update_city_stats_incremental(self, city_name, run_ids, city_run_paths, place_query):
@@ -487,15 +510,24 @@ class DataManager:
         return final_result
 
     def get_city_stats_stream(self, city_name):
-        yield {"status": "Filtering activities...", "progress": 10, "type": "progress"}
+        # 1. Load the run history and cached cities
+        runs_file = os.path.join(CACHE_DIR, "runs_summary.json")
+        if not os.path.exists(runs_file):
+            logger.error("Runs cache not found.")
+            yield {"status": "Error: Runs cache not found.", "progress": 100, "type": "progress"}
+            yield {"result": None, "type": "result"}
+            return
+            
+        with open(runs_file, "r") as f:
+            all_activities = json.load(f)
         
-        runs = [act for act in self.runs_summary if act.get('activityType', {}).get('typeKey', '') in ['running']]
+        runs = [act for act in all_activities if act.get('activityType', {}).get('typeKey', '') in ['running']]
         city_run_paths = []
         city_run_ids = []
-        city_run_lines = []
         total_ran_distance_m = 0
         
         # Quick filtering of runs in this city
+        city_runs_metadata = []
         for run in runs:
             act_id = str(run['activityId'])
             poly_file = os.path.join(POLYLINES_DIR, f"{act_id}.json")
@@ -507,9 +539,7 @@ class DataManager:
                         if self.get_city_name(lat, lon) == city_name:
                             city_run_paths.append(polyline)
                             city_run_ids.append(act_id)
-                            if len(polyline) > 1:
-                                city_run_lines.append(LineString([(lon, lat) for lat, lon in polyline]))
-
+                            city_runs_metadata.append(run)
                             distance_m = float(run.get('distance', 0) or 0)
                             if distance_m <= 0:
                                 distance_m = self._polyline_length_m(polyline)
@@ -519,10 +549,24 @@ class DataManager:
             yield {"status": "No runs found for this city.", "progress": 100, "type": "progress"}
             yield {"result": None, "type": "result"}
             return
+            
+        # Sort metadata by date to find the last run
+        # Garmin dates are usually "2023-10-27 08:30:15"
+        city_runs_metadata.sort(key=lambda x: x.get('startTimeLocal', ''), reverse=True)
+        last_run_meta = city_runs_metadata[0]
+        last_run_id = str(last_run_meta['activityId'])
+        last_run_path = []
+        with open(os.path.join(POLYLINES_DIR, f"{last_run_id}.json"), "r") as f:
+            last_run_path = json.load(f)
 
-        # Check Cache for final result display speed, but we still update the DB
-        # yield {"status": "Checking cache...", "progress": 20, "type": "progress"}
-        
+        last_run_data = {
+            'date': last_run_meta.get('startTimeLocal', 'Unknown'),
+            'distance_km': (last_run_meta.get('distance', 0) or 0) / 1000,
+            'duration_mins': (last_run_meta.get('duration', 0) or 0) / 60,
+            'speed_kmh': (last_run_meta.get('averageSpeed', 0) or 0) * 3.6, # m/s to km/h
+            'path': last_run_path
+        }
+
         # City boundary and street network query
         place_query = f"{city_name}, Israel"
         if "Be'er Sheva" in city_name or "Be\u05d2\u20ac\u2122er-Sheva" in city_name:
@@ -539,21 +583,28 @@ class DataManager:
 
         yield {"status": "Calculating statistics...", "progress": 80, "type": "progress"}
 
-        if city_run_lines:
-            runs_m = gpd.GeoDataFrame(geometry=city_run_lines, crs="EPSG:4326").to_crs(CRS_METERS)
-            run_geometries = list(runs_m.geometry)
-        else:
-            runs_m = self._empty_line_gdf(CRS_METERS)
-            run_geometries = []
-
-        total_street_length_m = self.merged_line_length_m(segments_gdf.geometry)
-        covered_street_length_m, covered_segments, run_corridor = self._calculate_unique_covered_length_m(
-            segments_gdf,
-            run_geometries,
-            total_ran_distance_m,
-        )
-        uncovered_segments = self._difference_segments_from_geometry(segments_gdf, run_corridor)
+        # NEW: Use the database flags instead of re-calculating the union of all runs
+        covered_mask = segments_gdf['is_covered'] > 0
+        covered_segments = segments_gdf[covered_mask].copy()
+        uncovered_segments = segments_gdf[~covered_mask].copy()
         
+        # 1. Get total unique city length from cache
+        cities_df = self._load_layer("cities")
+        total_street_length_m = 0
+        if cities_df is not None and city_name in cities_df['name'].values:
+            total_street_length_m = cities_df.loc[cities_df['name'] == city_name, "total_unique_length_m"].values[0]
+        
+        if total_street_length_m <= 0:
+            # Fallback if metadata is missing (should not happen with new _init_city_segments)
+            total_street_length_m = self.merged_line_length_m(segments_gdf.geometry)
+
+        # 2. Get unique covered length using merging (only on covered parts, which is faster)
+        covered_street_length_m = self.merged_line_length_m(covered_segments.geometry)
+        
+        # Safety: Cap covered length if it somehow exceeds total
+        if covered_street_length_m > total_street_length_m:
+            covered_street_length_m = total_street_length_m
+            
         # City area calculation
         try:
             city_gdf = ox.geocode_to_gdf(place_query)
@@ -563,24 +614,27 @@ class DataManager:
 
         # Format covered streets for the map
         covered_streets_data = []
-        covered_4326 = covered_segments.to_crs("EPSG:4326")
-        for idx, row in covered_4326.iterrows():
-            geom = row.geometry
-            count = int(row.get('pass_count', 1) or 1)
-            if geom.geom_type == 'LineString':
-                covered_streets_data.append({
-                    'path': [(lat, lon) for lon, lat in geom.coords],
-                    'count': count
-                })
+        if not covered_segments.empty:
+            covered_4326 = covered_segments.to_crs("EPSG:4326")
+            for idx, row in covered_4326.iterrows():
+                geom = row.geometry
+                count = int(row.get('pass_count', 1) or 1)
+                if geom.geom_type == 'LineString':
+                    covered_streets_data.append({
+                        'path': [(lat, lon) for lon, lat in geom.coords],
+                        'count': count
+                    })
 
         # Uncovered streets for mapping
         uncovered_streets_coords = []
-        uncovered_4326 = uncovered_segments.to_crs("EPSG:4326")
-        for geom in uncovered_4326.geometry:
-            if geom.geom_type == 'LineString':
-                uncovered_streets_coords.append([(lat, lon) for lon, lat in geom.coords])
+        if not uncovered_segments.empty:
+            uncovered_4326 = uncovered_segments.to_crs("EPSG:4326")
+            for geom in uncovered_4326.geometry:
+                if geom.geom_type == 'LineString':
+                    uncovered_streets_coords.append([(lat, lon) for lon, lat in geom.coords])
 
         percent_coverage = (covered_street_length_m / total_street_length_m) * 100 if total_street_length_m > 0 else 0
+
         
         stats_result = {
             'city': city_name,
@@ -591,12 +645,46 @@ class DataManager:
             'percent_coverage': percent_coverage,
             'run_paths': city_run_paths,
             'covered_streets': covered_streets_data,
-            'uncovered_streets': uncovered_streets_coords
+            'uncovered_streets': uncovered_streets_coords,
+            'last_run': last_run_data
         }
 
         yield {"status": "Complete!", "progress": 100, "type": "progress"}
         yield {"result": stats_result, "type": "result"}
 
+
+    def get_all_runs(self):
+        runs = [act for act in self.runs_summary if act.get('activityType', {}).get('typeKey', '') in ['running']]
+        all_paths = []
+        total_ran_distance_m = 0
+        
+        for run in runs:
+            act_id = str(run['activityId'])
+            poly_file = os.path.join(POLYLINES_DIR, f"{act_id}.json")
+            if os.path.exists(poly_file):
+                try:
+                    with open(poly_file, "r") as f:
+                        polyline = json.load(f)
+                        if polyline:
+                            all_paths.append(polyline)
+                            distance_m = float(run.get('distance', 0) or 0)
+                            if distance_m <= 0:
+                                distance_m = self._polyline_length_m(polyline)
+                            total_ran_distance_m += distance_m
+                except Exception as e:
+                    logger.warning(f"Failed to load polyline for {act_id}: {e}")
+
+        return {
+            'city': 'All Runs',
+            'total_ran_km': total_ran_distance_m / 1000,
+            'unique_covered_km': 0,
+            'total_street_km': 0,
+            'city_area_sq_km': 0,
+            'percent_coverage': 0,
+            'run_paths': all_paths,
+            'covered_streets': [],
+            'uncovered_streets': []
+        }
 
     def merged_line_length_m(self, geometries):
         valid_lines = []

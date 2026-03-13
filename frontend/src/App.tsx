@@ -25,6 +25,13 @@ interface CityStats {
   run_paths: [number, number][][];
   uncovered_streets: [number, number][][];
   covered_streets: { path: [number, number][], count: number }[];
+  last_run?: {
+    date: string;
+    distance_km: number;
+    duration_mins: number;
+    speed_kmh: number;
+    path: [number, number][];
+  };
 }
 
 type TripType = 'round_trip' | 'one_way';
@@ -74,8 +81,10 @@ function App() {
       const data = await res.json();
       setCities(data.cities);
       if (data.cities.length > 0) {
-        setSelectedCity(data.cities[0]);
-        fetchCityStats(data.cities[0]);
+        // Default to "All Runs" if available, otherwise first city
+        const defaultCity = data.cities.includes("All Runs") ? "All Runs" : data.cities[0];
+        setSelectedCity(defaultCity);
+        fetchCityStats(defaultCity);
       }
     } catch (err) {
       console.error("Failed to fetch cities", err);
@@ -90,6 +99,19 @@ function App() {
     setRouteStats(null);
     setStartPoint(null);
     
+    if (cityName === "All Runs") {
+      try {
+        const res = await fetch(`${API_BASE}/all-runs`);
+        const data = await res.json();
+        setStats(data);
+      } catch (err) {
+        console.error("Failed to fetch all runs", err);
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
     try {
       const response = await fetch(`${API_BASE}/city/${cityName}`);
       const reader = response.body?.getReader();
@@ -345,7 +367,7 @@ function App() {
         key: 'route-halo-outer',
         smoothFactor: 1.2,
         pathOptions: {
-          color: 'rgba(70, 255, 165, 1)',
+          color: 'rgba(255, 70, 200, 1)',
           weight: 12,
           opacity: 0.1,
           lineCap: 'round',
@@ -357,7 +379,7 @@ function App() {
         key: 'route-halo-inner',
         smoothFactor: 1.15,
         pathOptions: {
-          color: 'rgba(44, 255, 138, 1)',
+          color: 'rgba(255, 44, 180, 1)',
           weight: 8,
           opacity: 0.2,
           lineCap: 'round',
@@ -369,7 +391,7 @@ function App() {
         key: 'route-core',
         smoothFactor: 1.1,
         pathOptions: {
-          color: '#00ff66',
+          color: '#ff35b8',
           weight: 4.5,
           opacity: 0.98,
           lineCap: 'round',
@@ -379,6 +401,48 @@ function App() {
       }
     ];
   }, [generatedRoute]);
+
+  const lastRunLayers = useMemo(() => {
+    if (!stats?.last_run?.path || stats.last_run.path.length === 0) return [];
+    return [
+      {
+        key: 'lastrun-halo-outer',
+        smoothFactor: 1.2,
+        pathOptions: {
+          color: 'rgba(50, 255, 50, 1)',
+          weight: 14,
+          opacity: 0.15,
+          lineCap: 'round',
+          lineJoin: 'round',
+          interactive: false
+        } as L.PathOptions
+      },
+      {
+        key: 'lastrun-halo-inner',
+        smoothFactor: 1.15,
+        pathOptions: {
+          color: 'rgba(0, 255, 127, 1)',
+          weight: 9,
+          opacity: 0.3,
+          lineCap: 'round',
+          lineJoin: 'round',
+          interactive: false
+        } as L.PathOptions
+      },
+      {
+        key: 'lastrun-core',
+        smoothFactor: 1.1,
+        pathOptions: {
+          color: '#00ff66',
+          weight: 5,
+          opacity: 1,
+          lineCap: 'round',
+          lineJoin: 'round',
+          interactive: false
+        } as L.PathOptions
+      }
+    ];
+  }, [stats?.last_run]);
 
   return (
     <div className="app-container">
@@ -399,73 +463,101 @@ function App() {
               <span className="stat-label">Total Running Distance</span>
               <span className="stat-value">{stats.total_ran_km.toFixed(2)} km</span>
             </div>
-            <div className="stat-item">
-              <span className="stat-label">Unique Covered Distance</span>
-              <span className="stat-value highlight">{stats.unique_covered_km.toFixed(2)} km</span>
-            </div>
-            <div className="stat-item">
-              <span className="stat-label">Total Street Length</span>
-              <span className="stat-value">{stats.total_street_km.toFixed(2)} km</span>
-            </div>
-            <div className="stat-item">
-              <span className="stat-label">City Size (Area)</span>
-              <span className="stat-value">{stats.city_area_sq_km.toFixed(2)} km²</span>
-            </div>
-            <div className="stat-item">
-              <span className="stat-label">Street Coverage</span>
-              <span className="stat-value highlight">{stats.percent_coverage.toFixed(1)}%</span>
-            </div>
-
-            <div className="route-generator">
-              <h3>Route Generator</h3>
-              <p style={{fontSize: '0.85rem', color: '#aaa', marginBottom: '15px'}}>
-                Click on the map to set a {tripType === 'round_trip' ? 'start/finish' : 'start'} point.
-              </p>
-              <div className="input-group">
-                <label>Target Distance (km)</label>
-                <input 
-                  type="number" 
-                  value={targetDist} 
-                  onChange={(e) => setTargetDist(parseFloat(e.target.value))}
-                  min="1"
-                  max="50"
-                />
-              </div>
-              <div className="input-group">
-                <label>Trip Type</label>
-                <select
-                  value={tripType}
-                  onChange={(e) => setTripType(e.target.value as TripType)}
-                >
-                  <option value="round_trip">Round Trip</option>
-                  <option value="one_way">One Way</option>
-                </select>
-              </div>
-              <button
-                onClick={handleGenerateRoute}
-                disabled={!startPoint || loading}
-              >
-                {loading ? 'Generating...' : 'Generate Unvisited Route'}
-              </button>
-              {routeStats && (
-                <div className="route-stats">
-                  <div className="stat-item">
-                    <span className="stat-label">Discover Distance</span>
-                    <span className="stat-value highlight">{routeStats.new_distance_km.toFixed(2)} km</span>
-                  </div>
-                  <div className="stat-item">
-                    <span className="stat-label">Coverage Contribution</span>
-                    <span className="stat-value highlight">+{routeStats.coverage_contribution_pct.toFixed(2)}%</span>
-                  </div>
+            
+            {selectedCity !== "All Runs" && (
+              <>
+                <div className="stat-item">
+                  <span className="stat-label">Unique Covered Distance</span>
+                  <span className="stat-value highlight">{stats.unique_covered_km.toFixed(2)} km</span>
                 </div>
-              )}
-            </div>
+                <div className="stat-item">
+                  <span className="stat-label">Total Street Length</span>
+                  <span className="stat-value">{stats.total_street_km.toFixed(2)} km</span>
+                </div>
+                <div className="stat-item">
+                  <span className="stat-label">City Size (Area)</span>
+                  <span className="stat-value">{stats.city_area_sq_km.toFixed(2)} km²</span>
+                </div>
+                <div className="stat-item">
+                  <span className="stat-label">Street Coverage</span>
+                  <span className="stat-value highlight">{stats.percent_coverage.toFixed(1)}%</span>
+                </div>
+
+                {stats.last_run && (
+                  <div className="last-run-box">
+                    <h3>Last Run Details</h3>
+                    <div className="stat-item small">
+                      <span className="stat-label">Date</span>
+                      <span className="stat-value">{new Date(stats.last_run.date).toLocaleDateString()}</span>
+                    </div>
+                    <div className="stat-item small">
+                      <span className="stat-label">Distance</span>
+                      <span className="stat-value">{stats.last_run.distance_km.toFixed(2)} km</span>
+                    </div>
+                    <div className="stat-item small">
+                      <span className="stat-label">Duration</span>
+                      <span className="stat-value">{stats.last_run.duration_mins.toFixed(0)} mins</span>
+                    </div>
+                    <div className="stat-item small">
+                      <span className="stat-label">Avg Speed</span>
+                      <span className="stat-value">{stats.last_run.speed_kmh.toFixed(1)} km/h</span>
+                    </div>
+                  </div>
+                )}
+
+                <div className="route-generator">
+                  <h3>Route Generator</h3>
+                  <p style={{fontSize: '0.85rem', color: '#aaa', marginBottom: '15px'}}>
+                    Click on the map to set a {tripType === 'round_trip' ? 'start/finish' : 'start'} point.
+                  </p>
+                  <div className="input-group">
+                    <label>Target Distance (km)</label>
+                    <input 
+                      type="number" 
+                      value={targetDist} 
+                      onChange={(e) => setTargetDist(parseFloat(e.target.value))}
+                      min="1"
+                      max="50"
+                    />
+                  </div>
+                  <div className="input-group">
+                    <label>Trip Type</label>
+                    <select
+                      value={tripType}
+                      onChange={(e) => setTripType(e.target.value as TripType)}
+                    >
+                      <option value="round_trip">Round Trip</option>
+                      <option value="one_way">One Way</option>
+                    </select>
+                  </div>
+                  <button
+                    onClick={handleGenerateRoute}
+                    disabled={!startPoint || loading}
+                    style={{ backgroundColor: '#ff35b8' }}
+                  >
+                    {loading ? 'Generating...' : 'Generate Unvisited Route'}
+                  </button>
+                  {routeStats && (
+                    <div className="route-stats">
+                      <div className="stat-item">
+                        <span className="stat-label">Discover Distance</span>
+                        <span className="stat-value highlight">{routeStats.new_distance_km.toFixed(2)} km</span>
+                      </div>
+                      <div className="stat-item">
+                        <span className="stat-label">Coverage Contribution</span>
+                        <span className="stat-value highlight">+{routeStats.coverage_contribution_pct.toFixed(2)}%</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
           </div>
         )}
       </div>
 
       <div className="map-container">
-        {!startPoint && selectedCity && (
+        {selectedCity !== "All Runs" && !startPoint && selectedCity && (
           <div className="map-hint">
             Click anywhere to set {tripType === 'round_trip' ? 'Start/Finish' : 'Start'} point
           </div>
@@ -497,7 +589,26 @@ function App() {
             />
           ))}
 
-          {/* Generated Route in Neon Green */}
+          {/* Fallback for All Runs or simple polylines if covered_streets is empty */}
+          {coveredStreetLayers.length === 0 && stats?.run_paths.map((path, idx) => (
+             <Polyline 
+              key={`raw-path-${idx}`}
+              positions={path}
+              pathOptions={{ color: '#ff194e', weight: 3, opacity: 0.6 }}
+             />
+          ))}
+
+          {/* Last Run in Shiny Green */}
+          {lastRunLayers.map((layer) => (
+            <Polyline
+              key={layer.key}
+              positions={stats!.last_run!.path}
+              smoothFactor={layer.smoothFactor}
+              pathOptions={layer.pathOptions}
+            />
+          ))}
+
+          {/* Generated Route in Pink */}
           {generatedRouteLayers.map((layer) => (
             <Polyline
               key={layer.key}

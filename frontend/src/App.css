@@ -91,6 +91,28 @@ h1 {
   color: var(--primary-color);
 }
 
+.last-run-box {
+  margin-top: 20px;
+  padding: 15px;
+  background: rgba(0, 255, 102, 0.04);
+  border: 1px solid rgba(0, 255, 102, 0.15);
+  border-radius: 8px;
+}
+
+.last-run-box h3 {
+  font-size: 1rem;
+  color: #00ff66;
+  margin-bottom: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.stat-item.small {
+  margin-bottom: 8px;
+  font-size: 0.85rem;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+
 .route-generator {
   margin-top: 20px;
   padding-top: 20px;

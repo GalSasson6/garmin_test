@@ -33,7 +33,15 @@ class RouteRequest(BaseModel):
 async def get_cities():
     try:
         cities = data_manager.get_cities()
-        return {"cities": cities}
+        return {"cities": ["All Runs"] + cities}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/all-runs")
+async def get_all_runs():
+    try:
+        result = data_manager.get_all_runs()
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
