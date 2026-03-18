@@ -38,6 +38,12 @@ temp_*
 # Generated map/HTML outputs
 *.html
 
+# Keep app manifests and frontend entrypoints tracked
+!frontend/package.json
+!frontend/package-lock.json
+!frontend/tsconfig.json
+!frontend/index.html
+
 # Archives
 *.zip
 *.tar.gz
