@@ -1,7 +1,12 @@
 .env
+.env.*
+!.env.example
+frontend/.env
+frontend/.env.*
 .garminconnect
-.garmin_cache
-.cache
+.garminconnect_base64
+.garmin_cache/
+.cache/
 
 # Byte-compiled / caches
 __pycache__/
@@ -18,9 +23,11 @@ cache/
 temp_*
 *.log
 *.json
+*.sqlite
 *.sqlite3
 *.db
 *.csv
+*.gpkg
 
 # Garmin / GPS files and exports
 *.gpx

@@ -5,7 +5,9 @@ This application allows you to visualize your Garmin runs in different cities, v
 ## Prerequisites
 - Python 3.8+
 - Node.js & npm
-- Garmin Connect credentials (set in `.env` file in the root directory)
+- Garmin Connect credentials
+
+Create a local `.env` file in the repo root from `.env.example`, then fill in your own Garmin credentials.
 
 ## Setup & Running
 
