@@ -72,22 +72,59 @@ function App() {
   const [routeStats, setRouteStats] = useState<{ new_distance_km: number; coverage_contribution_pct: number } | null>(null);
 
   useEffect(() => {
-    fetchCities();
+    void initializeApp();
   }, []);
 
-  const fetchCities = async () => {
+  const syncRuns = async () => {
+    setLoading(true);
+    setLoadingMsg('Checking Garmin for new runs...');
+    setProgress(10);
+
+    try {
+      const res = await fetch(`${API_BASE}/fetch-runs`, { method: 'POST' });
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => null);
+        throw new Error(errorData?.detail || 'Failed to sync Garmin runs');
+      }
+
+      const data = await res.json();
+      setLoadingMsg(data.message || 'Garmin sync complete.');
+      setProgress(35);
+      return true;
+    } catch (err) {
+      console.warn('Failed to sync latest Garmin runs, falling back to cached data', err);
+      setLoadingMsg('Could not sync Garmin right now. Using cached data...');
+      setProgress(20);
+      return false;
+    }
+  };
+
+  const initializeApp = async () => {
+    await syncRuns();
+    await fetchCities();
+  };
+
+  const fetchCities = async (preferredCity?: string) => {
     try {
       const res = await fetch(`${API_BASE}/cities`);
       const data = await res.json();
       setCities(data.cities);
       if (data.cities.length > 0) {
-        // Default to "All Runs" if available, otherwise first city
-        const defaultCity = data.cities.includes("All Runs") ? "All Runs" : data.cities[0];
+        const defaultCity =
+          preferredCity && data.cities.includes(preferredCity)
+            ? preferredCity
+            : data.cities.includes("All Runs")
+              ? "All Runs"
+              : data.cities[0];
         setSelectedCity(defaultCity);
-        fetchCityStats(defaultCity);
+        await fetchCityStats(defaultCity);
+      } else {
+        setStats(null);
+        setLoading(false);
       }
     } catch (err) {
       console.error("Failed to fetch cities", err);
+      setLoading(false);
     }
   };
 
@@ -200,7 +237,13 @@ function App() {
 
   const handleCityChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     setSelectedCity(e.target.value);
-    fetchCityStats(e.target.value);
+    void fetchCityStats(e.target.value);
+  };
+
+  const handleSyncLatestRuns = async () => {
+    const currentCity = selectedCity;
+    await syncRuns();
+    await fetchCities(currentCity);
   };
 
   const mapCenter: [number, number] = stats && stats.run_paths.length > 0 
@@ -454,6 +497,14 @@ function App() {
           <select value={selectedCity} onChange={handleCityChange}>
             {cities.map(c => <option key={c} value={c}>{c}</option>)}
           </select>
+          <button
+            type="button"
+            onClick={() => void handleSyncLatestRuns()}
+            disabled={loading}
+            style={{ marginTop: '10px' }}
+          >
+            Sync Latest Runs
+          </button>
         </div>
 
         {stats && (

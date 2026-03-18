@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import Mock
 
 import geopandas as gpd
 from shapely.geometry import LineString
@@ -76,6 +77,39 @@ class CoverageLogicTest(unittest.TestCase):
         self.assertLess(unique_covered_length_m, 1025.0)
         self.assertLess(unique_covered_length_m, 2000.0)
         self.assertGreaterEqual(len(covered_segments), 1)
+
+    def test_get_cities_fetches_missing_polyline_on_demand(self):
+        self.data_manager.runs_summary = [
+            {
+                "activityId": 123,
+                "hasPolyline": True,
+                "activityType": {"typeKey": "running"},
+            }
+        ]
+        self.data_manager.get_polyline = Mock(return_value=[(32.1, 34.8), (32.2, 34.9)])
+        self.data_manager.get_city_name = Mock(return_value="Raanana")
+
+        cities = self.data_manager.get_cities()
+
+        self.assertEqual(cities, ["Raanana"])
+        self.data_manager.get_polyline.assert_called_once_with(123)
+
+    def test_get_all_runs_fetches_missing_polyline_on_demand(self):
+        self.data_manager.runs_summary = [
+            {
+                "activityId": 456,
+                "hasPolyline": True,
+                "distance": 1000,
+                "activityType": {"typeKey": "running"},
+            }
+        ]
+        self.data_manager.get_polyline = Mock(return_value=[(32.1, 34.8), (32.2, 34.9)])
+
+        result = self.data_manager.get_all_runs()
+
+        self.assertEqual(len(result["run_paths"]), 1)
+        self.assertAlmostEqual(result["total_ran_km"], 1.0)
+        self.data_manager.get_polyline.assert_called_once_with(456)
 
 
 if __name__ == "__main__":

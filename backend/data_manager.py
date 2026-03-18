@@ -413,6 +413,12 @@ class DataManager:
             if not success:
                 return False, msg
 
+        previous_ids = {
+            str(act.get("activityId"))
+            for act in self.runs_summary
+            if act.get("activityId") is not None
+        }
+
         all_activities = []
         for i in range(0, 2000, 500):
             chunk = self.api.get_activities(i, 500)
@@ -428,7 +434,17 @@ class DataManager:
             json.dump(all_activities, f)
         
         self.runs_summary = all_activities
-        return True, f"Fetched {len(all_activities)} activities"
+        new_running_activities = [
+            act
+            for act in self._get_running_activities(all_activities)
+            if str(act.get("activityId")) not in previous_ids
+        ]
+        prefetched_count = self._prefetch_recent_polylines(new_running_activities)
+        return (
+            True,
+            f"Fetched {len(all_activities)} activities and cached {prefetched_count} "
+            f"new run polylines",
+        )
 
     def get_city_name(self, lat, lon):
         coords_key = f"{round(lat, 3)},{round(lon, 3)}"
@@ -463,8 +479,11 @@ class DataManager:
         poly_file = os.path.join(POLYLINES_DIR, f"{act_id}.json")
         
         if os.path.exists(poly_file):
-            with open(poly_file, "r") as f:
-                return json.load(f)
+            try:
+                with open(poly_file, "r") as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to read cached polyline for {act_id}: {e}")
         
         if not self.is_authenticated:
             success, msg = self.authenticate()
@@ -484,20 +503,50 @@ class DataManager:
             logger.error(f"Failed to get details for {act_id}: {e}")
             return []
 
-    def get_cities(self):
-        runs = [act for act in self.runs_summary if act.get('activityType', {}).get('typeKey', '') in ['running']]
-        cities = set()
-        for run in runs:
-            act_id = str(run['activityId'])
+    def _get_running_activities(self, activities=None):
+        source = activities if activities is not None else self.runs_summary
+        return [
+            act
+            for act in source
+            if act.get("activityType", {}).get("typeKey", "") == "running"
+        ]
+
+    def _get_run_polyline(self, run):
+        if not run.get("hasPolyline", True):
+            return []
+        return self.get_polyline(run["activityId"])
+
+    def _prefetch_recent_polylines(self, activities, limit=10):
+        if not activities:
+            return 0
+
+        recent_activities = sorted(
+            activities,
+            key=lambda act: act.get("startTimeLocal", ""),
+            reverse=True,
+        )[:limit]
+
+        prefetched_count = 0
+        for run in recent_activities:
+            act_id = str(run["activityId"])
             poly_file = os.path.join(POLYLINES_DIR, f"{act_id}.json")
             if os.path.exists(poly_file):
-                with open(poly_file, "r") as f:
-                    polyline = json.load(f)
-                    if polyline:
-                        lat, lon = polyline[0]
-                        city = self.get_city_name(lat, lon)
-                        if city and city != "Unknown":
-                            cities.add(city)
+                continue
+            if self._get_run_polyline(run):
+                prefetched_count += 1
+
+        return prefetched_count
+
+    def get_cities(self):
+        runs = self._get_running_activities()
+        cities = set()
+        for run in runs:
+            polyline = self._get_run_polyline(run)
+            if polyline:
+                lat, lon = polyline[0]
+                city = self.get_city_name(lat, lon)
+                if city and city != "Unknown":
+                    cities.add(city)
         return sorted(list(cities))
 
     def get_city_stats(self, city_name):
@@ -521,7 +570,7 @@ class DataManager:
         with open(runs_file, "r") as f:
             all_activities = json.load(f)
         
-        runs = [act for act in all_activities if act.get('activityType', {}).get('typeKey', '') in ['running']]
+        runs = self._get_running_activities(all_activities)
         city_run_paths = []
         city_run_ids = []
         total_ran_distance_m = 0
@@ -530,20 +579,17 @@ class DataManager:
         city_runs_metadata = []
         for run in runs:
             act_id = str(run['activityId'])
-            poly_file = os.path.join(POLYLINES_DIR, f"{act_id}.json")
-            if os.path.exists(poly_file):
-                with open(poly_file, "r") as f:
-                    polyline = json.load(f)
-                    if polyline:
-                        lat, lon = polyline[0]
-                        if self.get_city_name(lat, lon) == city_name:
-                            city_run_paths.append(polyline)
-                            city_run_ids.append(act_id)
-                            city_runs_metadata.append(run)
-                            distance_m = float(run.get('distance', 0) or 0)
-                            if distance_m <= 0:
-                                distance_m = self._polyline_length_m(polyline)
-                            total_ran_distance_m += distance_m
+            polyline = self._get_run_polyline(run)
+            if polyline:
+                lat, lon = polyline[0]
+                if self.get_city_name(lat, lon) == city_name:
+                    city_run_paths.append(polyline)
+                    city_run_ids.append(act_id)
+                    city_runs_metadata.append(run)
+                    distance_m = float(run.get('distance', 0) or 0)
+                    if distance_m <= 0:
+                        distance_m = self._polyline_length_m(polyline)
+                    total_ran_distance_m += distance_m
 
         if not city_run_paths:
             yield {"status": "No runs found for this city.", "progress": 100, "type": "progress"}
@@ -554,10 +600,7 @@ class DataManager:
         # Garmin dates are usually "2023-10-27 08:30:15"
         city_runs_metadata.sort(key=lambda x: x.get('startTimeLocal', ''), reverse=True)
         last_run_meta = city_runs_metadata[0]
-        last_run_id = str(last_run_meta['activityId'])
-        last_run_path = []
-        with open(os.path.join(POLYLINES_DIR, f"{last_run_id}.json"), "r") as f:
-            last_run_path = json.load(f)
+        last_run_path = self._get_run_polyline(last_run_meta)
 
         last_run_data = {
             'date': last_run_meta.get('startTimeLocal', 'Unknown'),
@@ -654,25 +697,18 @@ class DataManager:
 
 
     def get_all_runs(self):
-        runs = [act for act in self.runs_summary if act.get('activityType', {}).get('typeKey', '') in ['running']]
+        runs = self._get_running_activities()
         all_paths = []
         total_ran_distance_m = 0
         
         for run in runs:
-            act_id = str(run['activityId'])
-            poly_file = os.path.join(POLYLINES_DIR, f"{act_id}.json")
-            if os.path.exists(poly_file):
-                try:
-                    with open(poly_file, "r") as f:
-                        polyline = json.load(f)
-                        if polyline:
-                            all_paths.append(polyline)
-                            distance_m = float(run.get('distance', 0) or 0)
-                            if distance_m <= 0:
-                                distance_m = self._polyline_length_m(polyline)
-                            total_ran_distance_m += distance_m
-                except Exception as e:
-                    logger.warning(f"Failed to load polyline for {act_id}: {e}")
+            polyline = self._get_run_polyline(run)
+            if polyline:
+                all_paths.append(polyline)
+                distance_m = float(run.get('distance', 0) or 0)
+                if distance_m <= 0:
+                    distance_m = self._polyline_length_m(polyline)
+                total_ran_distance_m += distance_m
 
         return {
             'city': 'All Runs',
