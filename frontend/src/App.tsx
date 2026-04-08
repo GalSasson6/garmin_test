@@ -3,6 +3,10 @@ import './App.css';
 import 'leaflet/dist/leaflet.css';
 import { MapContainer, TileLayer, Polyline, Marker, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
+import { useIsMobile } from './hooks/useIsMobile';
+import { useGeolocation } from './hooks/useGeolocation';
+import { useDeviceOrientation } from './hooks/useDeviceOrientation';
+import UserLocationMarker from './components/UserLocationMarker';
 
 // Fix for default marker icons in Leaflet with React
 // @ts-ignore
@@ -70,6 +74,22 @@ function App() {
   const [tripType, setTripType] = useState<TripType>('round_trip');
   const [generatedRoute, setGeneratedRoute] = useState<[number, number][] | null>(null);
   const [routeStats, setRouteStats] = useState<{ new_distance_km: number; coverage_contribution_pct: number } | null>(null);
+
+  const isMobile = useIsMobile();
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const geo = useGeolocation();
+  const orientation = useDeviceOrientation();
+
+  const handleLocateMe = async () => {
+    if (geo.isTracking) {
+      geo.stopTracking();
+      return;
+    }
+    if (orientation.isSupported && orientation.permissionState === 'prompt') {
+      await orientation.requestPermission();
+    }
+    geo.startTracking();
+  };
 
   useEffect(() => {
     void initializeApp();
@@ -489,7 +509,8 @@ function App() {
 
   return (
     <div className="app-container">
-      <div className="sidebar">
+      <div className={`sidebar${isMobile && !sidebarOpen ? ' collapsed' : ''}`}>
+        <div className="sidebar-handle" onClick={() => setSidebarOpen(!sidebarOpen)} />
         <h1>Garmin City Explorer</h1>
         
         <div className="city-selector">
@@ -610,9 +631,16 @@ function App() {
       <div className="map-container">
         {selectedCity !== "All Runs" && !startPoint && selectedCity && (
           <div className="map-hint">
-            Click anywhere to set {tripType === 'round_trip' ? 'Start/Finish' : 'Start'} point
+            {isMobile ? 'Tap' : 'Click'} anywhere to set {tripType === 'round_trip' ? 'Start/Finish' : 'Start'} point
           </div>
         )}
+        <button
+          className={`locate-btn${geo.isTracking ? ' active' : ''}${geo.error ? ' error' : ''}`}
+          onClick={handleLocateMe}
+          title={geo.error || (geo.isTracking ? 'Stop tracking' : 'Show my location')}
+        >
+          &#x2316;
+        </button>
         <MapContainer center={mapCenter} zoom={13} scrollWheelZoom={true} preferCanvas={true}>
           <TileLayer
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
@@ -671,6 +699,14 @@ function App() {
 
           {startPoint && (
             <Marker position={startPoint} />
+          )}
+
+          {geo.position && (
+            <UserLocationMarker
+              position={geo.position}
+              heading={orientation.heading}
+              accuracy={geo.accuracy}
+            />
           )}
         </MapContainer>
       </div>

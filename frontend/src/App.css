@@ -260,3 +260,143 @@ button:disabled {
   pointer-events: none;
   font-weight: bold;
 }
+
+/* --- Locate Me Button --- */
+
+.locate-btn {
+  position: absolute;
+  bottom: 20px;
+  right: 20px;
+  z-index: 1001;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--panel-bg);
+  border: 2px solid var(--border-color);
+  color: #00e5ff;
+  font-size: 1.3rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+  transition: background 0.2s, border-color 0.2s;
+  padding: 0;
+}
+
+.locate-btn:hover {
+  background: rgba(0, 229, 255, 0.15);
+}
+
+.locate-btn.active {
+  border-color: #00e5ff;
+  box-shadow: 0 0 12px rgba(0, 229, 255, 0.4);
+}
+
+.locate-btn.error {
+  border-color: var(--primary-color);
+  color: var(--primary-color);
+}
+
+/* --- User Location Marker --- */
+
+.user-location-icon {
+  background: none !important;
+  border: none !important;
+}
+
+.user-location-dot {
+  width: 16px;
+  height: 16px;
+  margin: 7px;
+  background: #00e5ff;
+  border-radius: 50%;
+  border: 2px solid #007a8a;
+  box-shadow: 0 0 8px #00e5ff;
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { box-shadow: 0 0 8px #00e5ff; }
+  50% { box-shadow: 0 0 18px #00e5ff, 0 0 30px rgba(0, 229, 255, 0.3); }
+}
+
+/* --- Sidebar Handle (mobile only) --- */
+
+.sidebar-handle {
+  display: none;
+}
+
+/* --- Mobile Responsive Layout --- */
+
+@media (max-width: 768px) {
+  .app-container {
+    flex-direction: column-reverse;
+  }
+
+  .sidebar {
+    width: 100%;
+    height: auto;
+    max-height: 45vh;
+    border-right: none;
+    border-top: 1px solid var(--border-color);
+    padding: 15px;
+    transition: max-height 0.3s ease, padding 0.3s ease;
+  }
+
+  .sidebar.collapsed {
+    max-height: 0;
+    padding: 0 15px;
+    overflow: hidden;
+    border-top: none;
+  }
+
+  .map-container {
+    flex: 1;
+    min-height: 55vh;
+  }
+
+  .sidebar-handle {
+    display: flex;
+    justify-content: center;
+    padding: 8px 0 4px;
+    cursor: pointer;
+  }
+
+  .sidebar-handle::after {
+    content: '';
+    width: 40px;
+    height: 4px;
+    background: var(--border-color);
+    border-radius: 2px;
+  }
+
+  h1 {
+    font-size: 1.25rem;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+  }
+
+  button {
+    padding: 14px;
+    font-size: 1rem;
+    min-height: 44px;
+  }
+
+  .city-selector select,
+  .input-group input,
+  .input-group select {
+    padding: 12px;
+    font-size: 1rem;
+    min-height: 44px;
+  }
+
+  .progress-container {
+    width: 250px;
+  }
+
+  .map-hint {
+    font-size: 0.85rem;
+    padding: 8px 14px;
+  }
+}
