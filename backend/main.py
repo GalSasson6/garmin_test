@@ -106,5 +106,12 @@ async def fetch_runs():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+import os
+from fastapi.staticfiles import StaticFiles
+
+# Mount static frontend if it exists
+if os.path.exists("frontend/build"):
+    app.mount("/", StaticFiles(directory="frontend/build", html=True), name="frontend")
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
