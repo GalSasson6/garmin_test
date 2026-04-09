@@ -3,7 +3,7 @@ FROM node:18-alpine AS frontend-builder
 WORKDIR /app/frontend
 # Install dependencies
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm ci || npm install
+RUN npm install
 # Copy frontend code and build
 COPY frontend/ ./
 RUN npm run build
@@ -24,7 +24,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy backend code
 COPY backend/ ./backend/
-COPY main.py data_manager.py city_coverage.py map_all_runs.py ./ 2>/dev/null || true
+COPY main.py ./
 
 # Copy frontend build from stage 1
 COPY --from=frontend-builder /app/frontend/build ./frontend/build
